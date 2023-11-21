@@ -26,7 +26,7 @@
 #include "wifiCredentials.h"
 
 /*
-Task                Core  Prio     Descrição
+Task                         Core  Prio                     Descrição
 ----------------------------------------------------------------------------------------------------
 vTaskUpdate                   0     3     Atualiza as informações através de um POST no MongoDB Atlas
 vTaskCheckWiFi                0     2     Verifica a conexão WiFi e tenta reconectar caso esteja deconectado
