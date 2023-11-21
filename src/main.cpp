@@ -16,6 +16,7 @@
 #include "PIDController.h"
 #include "SPIFFS.h"
 #include "TDSMeter.h"
+#include "Thermistor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -27,50 +28,57 @@
 /*
 Task                Core  Prio     Descrição
 ----------------------------------------------------------------------------------------------------
-vTaskUpdate          0     3     Atualiza as informações através de um POST no MongoDB Atlas
-vTaskCheckWiFi       0     2     Verifica a conexão WiFi e tenta reconectar caso esteja deconectado
-vTaskMqttReconnect   0     2     Verifica a conexão MQTT e tenta reconectar caso esteja deconectado
-vTaskNTP             0     1     Atualiza o horário com base no NTP
-vTaskTurnOnPump      1     3     Liga a bomba quando chegar no seu horário de acionamento
-vTaskTdsSensorRead   1     1     Lê o sensor de TDS
-vTaskTdsDataProcess  1     2     Processa os dados do sensor de TDS
-vTaskPhSensorRead    1     2     Lê o sensor de pH
-vTaskPhDataProcess   1     2     Processa os dados do sensor de pH
-vTaskTdsMotorControl 1     1     Controla o motor da bomba de TDS
-vTaskPhMotorControl  1     1     Controla o motor da bomba de pH
+vTaskUpdate                   0     3     Atualiza as informações através de um POST no MongoDB Atlas
+vTaskCheckWiFi                0     2     Verifica a conexão WiFi e tenta reconectar caso esteja deconectado
+vTaskMqttReconnect            0     2     Verifica a conexão MQTT e tenta reconectar caso esteja deconectado
+vTaskNTP                      0     1     Atualiza o horário com base no NTP
+vTaskTurnOnPump               1     3     Liga a bomba quando chegar no seu horário de acionamento
+vTaskTdsSensorRead            1     1     Lê o sensor de TDS
+vTaskTdsDataProcess           1     2     Processa os dados do sensor de TDS
+vTaskPhSensorRead             1     1     Lê o sensor de pH
+vTaskPhDataProcess            1     2     Processa os dados do sensor de pH
+vTaskThermistorSensorRead     1     1     Lê o sensor de temperatura
+vTaskThermistorDataProcess    1     2     Processa os dados do sensor de temperatura
+vTaskTdsMotorControl          1     1     Controla o motor da bomba de TDS
+vTaskPhMotorControl           1     1     Controla o motor da bomba de pH
 
 */
 
 // Pump Timers configuration
 #define LED_BUILTIN 25
 #define NUMBER_OUTPUTS 4
-#define ACTIVE_PUMPS 4
+#define ACTIVE_PUMPS 2
 #define UPDATE_DELAY 300000
 #define TURN_ON_PUMP_DELAY 100
 
 const uint8_t outputGPIOs[NUMBER_OUTPUTS] = {21, 19, 18, 5};
 
 HydraulicPumpController myPumps[ACTIVE_PUMPS] = {
-     HydraulicPumpController("code01", outputGPIOs[0], 900000),
-     HydraulicPumpController("code02", outputGPIOs[1], 60000),
-     HydraulicPumpController("code03", outputGPIOs[2], 60000),
-     HydraulicPumpController("code04", outputGPIOs[3], 60000),
+    HydraulicPumpController("code05", outputGPIOs[0], 60000),
+    HydraulicPumpController("code06", outputGPIOs[1], 60000),
 };
 
-// TDS and PH configuration
+// TDS, PH and Thermistor configuration
 #define TdsSensorPin 36
 #define PhSensorPin 39
+#define ThermistorPin 34
 
 const float VRef = 3.3;
 const int SCount = 30;
 const float Temperature = 25.0;
 const float CellConstant = 0.973;
+const uint16_t NominalRes = 10000;
+const uint16_t BCoef = 3950;
+const uint16_t SerialRes = 10000;
 
 // Instancia a classe TDSMeter
 TDSMeter tdsMeter(TdsSensorPin, VRef, SCount, Temperature, CellConstant);
 
 // Instancia a classe PHMeter
 PHMeter phMeter(PhSensorPin, VRef, SCount);
+
+// Instancia a classe Thermistor
+Thermistor thermistor(ThermistorPin, NominalRes, BCoef, SerialRes, SCount, Temperature);
 
 // PID Controller configuration
 
@@ -137,6 +145,8 @@ TaskHandle_t TdsSensorReadTaskHandle = NULL;
 TaskHandle_t TdsDataProcessTaskHandle = NULL;
 TaskHandle_t PhSensorReadTaskHandle = NULL;
 TaskHandle_t PhDataProcessTaskHandle = NULL;
+TaskHandle_t ThermistorSensorReadTaskHandle = NULL;
+TaskHandle_t ThermistorDataProcessTaskHandle = NULL;
 TaskHandle_t TdsMotorControlTaskHandle = NULL;
 TaskHandle_t PhMotorControlTaskHandle = NULL;
 
@@ -149,6 +159,8 @@ void vTaskTdsSensorReadTask(void* pvParameter);
 void vTaskTdsDataProcessTask(void* pvParameter);
 void vTaskPhSensorReadTask(void* pvParameter);
 void vTaskPhDataProcessTask(void* pvParameter);
+void vTaskThermistorSensorReadTask(void* pvParameter);
+void vTaskThermistorDataProcessTask(void* pvParameter);
 void vTaskTdsMotorControlTask(void* pvParameter);
 void vTaskPhMotorControlTask(void* pvParameter);
 
@@ -365,8 +377,10 @@ void initRtos() {
 
    xTaskCreatePinnedToCore(vTaskTdsSensorReadTask, "TDS Sensor Read Task", 4096, NULL, 1, &TdsSensorReadTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskTdsDataProcessTask, "TDS Data Process Task", 4096, NULL, 2, &TdsDataProcessTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskPhSensorReadTask, "pH Meter Task", 4096, NULL, 2, &PhSensorReadTaskHandle, APP_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskPhSensorReadTask, "pH Meter Task", 4096, NULL, 1, &PhSensorReadTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskPhDataProcessTask, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskThermistorSensorReadTask, "Thermistor Sensor Read Task", 4096, NULL, 1, &ThermistorSensorReadTaskHandle, APP_CPU_NUM);
+   xTaskCreatePinnedToCore(vTaskThermistorDataProcessTask, "Thermistor Data Process Task", 4096, NULL, 2, &ThermistorDataProcessTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskTdsMotorControlTask, "TDS Motor Control", 4096, NULL, 1, &TdsMotorControlTaskHandle, APP_CPU_NUM);
    xTaskCreatePinnedToCore(vTaskPhMotorControlTask, "PH Motor Control", 4096, NULL, 1, &PhMotorControlTaskHandle, APP_CPU_NUM);
 }
@@ -575,6 +589,32 @@ void vTaskPhDataProcessTask(void* pvParameter) {
          String phMessage = String(phValue, 2);
          if (client.connected()) {
             client.publish(phTopic.c_str(), phMessage.c_str());
+         }
+         xSemaphoreGive(xWifiMutex);
+      }
+
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+   }
+}
+
+void vTaskThermistorSensorReadTask(void* pvParameter) {
+   while (true) {
+      thermistor.update();
+      vTaskDelay(100 / portTICK_PERIOD_MS);
+   }
+}
+
+void vTaskThermistorDataProcessTask(void* pvParameter) {
+   while (true) {
+      float temperature = thermistor.getTemperature();
+
+      Serial.printf("Temperature: %.2f °C\n", temperature);
+
+      if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
+         String temperatureTopic = String("sensors/") + String(WiFi.getHostname()) + "/temperature";
+         String temperatureMessage = String(temperature, 2);
+         if (client.connected()) {
+            client.publish(temperatureTopic.c_str(), temperatureMessage.c_str());
          }
          xSemaphoreGive(xWifiMutex);
       }
