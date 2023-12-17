@@ -27,7 +27,7 @@ void TDSMeter::update() {
    // Calcula a condutividade em microsiemens por centímetro (uS/cm)
    // A equação é: Condutividade = (Tensão Compensada / Constante da Célula) * 1000
    // Onde a Constante da Célula é um valor específico do seu sensor que deve ser conhecido
-   _tdsValue = (compensationVoltage / _cellConstant) * 1000;  // Multiplica por 1000 para converter de S/cm para uS/cm
+   _tdsValue = (compensationVoltage / _cellConstant) * 1000;  // Multiplica por 1000 para converter de mS/cm para uS/cm
 }
 
 float TDSMeter::getTDSValue() const {

@@ -25,6 +25,8 @@ float Pid::pid_control(float input, float target) {
    }
 
    double error = target - input;
+   if (controller_direction == Action::reverse) error = -error;
+
    proportional = kp * error;
 
    integral += (ki * error * dt);
@@ -45,6 +47,32 @@ void Pid::setKp(double value) { kp = value; };
 void Pid::setKi(double value) { ki = value; };
 
 void Pid::setKd(double value) { kd = value; };
+
+void Pid::setControllerDirection(Action direction) {
+   controller_direction = direction;
+}
+void Pid::setControllerDirection(uint8_t direction) {
+   controller_direction = (Action)direction;
+}
+
+void Pid::setControllerDirection(const std::string& direction) {
+   std::string dirLower = direction;
+   std::transform(dirLower.begin(), dirLower.end(), dirLower.begin(), ::tolower);
+
+   if (dirLower == "direct") {
+      controller_direction = Action::direct;
+   } else if (dirLower == "reverse") {
+      controller_direction = Action::reverse;
+   } else {
+      // Registro de erro
+      ESP_LOGE("PID", "Invalid controller direction: %s", direction.c_str());
+      // Ou, se não estiver usando o ESP logging:
+      // Serial.println("Error: Invalid controller direction provided.");
+
+      // Defina um valor padrão ou mantenha o valor atual
+      controller_direction = Action::direct;
+   }
+}
 
 double Pid::getKp() { return kp; };
 

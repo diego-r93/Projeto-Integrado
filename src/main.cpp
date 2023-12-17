@@ -27,7 +27,7 @@
 
 /*
 Task                         Core  Prio                     Descrição
-----------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------
 vTaskUpdate                   0     3     Atualiza as informações através de um POST no MongoDB Atlas
 vTaskCheckWiFi                0     2     Verifica a conexão WiFi e tenta reconectar caso esteja deconectado
 vTaskMqttReconnect            0     2     Verifica a conexão MQTT e tenta reconectar caso esteja deconectado
@@ -47,21 +47,34 @@ vTaskPhMotorControl           1     1     Controla o motor da bomba de pH
 // Pump Timers configuration
 #define LED_BUILTIN 25
 #define NUMBER_OUTPUTS 4
-#define ACTIVE_PUMPS 2
+#define ACTIVE_PUMPS 4
 #define UPDATE_DELAY 300000
 #define TURN_ON_PUMP_DELAY 100
 
 const uint8_t outputGPIOs[NUMBER_OUTPUTS] = {21, 19, 18, 5};
 
 HydraulicPumpController myPumps[ACTIVE_PUMPS] = {
-    HydraulicPumpController("code05", outputGPIOs[0], 60000),
-    HydraulicPumpController("code06", outputGPIOs[1], 60000),
+    HydraulicPumpController("code01", outputGPIOs[0], 60000),
+    HydraulicPumpController("code02", outputGPIOs[1], 60000),
+    HydraulicPumpController("code03", outputGPIOs[2], 60000),
+    HydraulicPumpController("code04", outputGPIOs[3], 60000),
 };
 
 // TDS, PH and Thermistor configuration
 #define TdsSensorPin 36
 #define PhSensorPin 39
 #define ThermistorPin 34
+
+#define TDS_SENSOR_READ_DELAY 100
+#define PH_SENSOR_READ_DELAY 100
+#define THERMISTOR_SENSOR_READ_DELAY 100
+
+#define TDS_DATA_PROCESS_DELAY 1000
+#define PH_DATA_PROCESS_DELAY 1000
+#define THERMISTOR_DATA_PROCESS_DELAY 1000
+
+#define TDS_MOTOR_CONTROL_DELAY 100
+#define PH_MOTOR_CONTROL_DELAY 100
 
 const float VRef = 3.3;
 const int SCount = 30;
@@ -102,8 +115,8 @@ const int resolution = 8;
 volatile int dutyCycleA = 0;
 volatile int dutyCycleB = 1;
 
-Pid pidPH;
 Pid pidTDS;
+Pid pidPH;
 
 // NTP configuration
 #define CHECK_WIFI_DELAY 100
@@ -120,7 +133,9 @@ NTPClient ntp(udp, "a.st1.ntp.br", -3 * 3600, 3600000);
 // IPAddress subnet(255, 255, 255, 0);
 
 // MQTT configuration
-String mqtt_server;
+#define CHECK_MQTT_DELAY 500
+
+String mqtt_server = "192.168.0.100";
 const uint16_t mqtt_port = 1883;
 
 WiFiClient espClient;
@@ -285,7 +300,7 @@ void loadConfigurationCloud(const char* pumperCode, DynamicJsonDocument* jsonDat
    if (error)
       Serial.println("Failed to read document, using default configuration");
 
-   serializeJsonPretty(response["document"], Serial);
+   // serializeJsonPretty(response["document"], Serial);
 
    *jsonData = response["document"];
 }
@@ -350,16 +365,40 @@ void initWiFi() {
    Serial.println(WiFi.getHostname());
 }
 
-void initConfiguration() {
+void initNTP() {
+   ntp.begin();
+   ntp.forceUpdate();
+}
+
+void initMqtt() {
+   Serial.print("Attempting MQTT connection on: ");
+   Serial.print(mqtt_server);
+   Serial.print(":");
+   Serial.print(mqtt_port);
+   Serial.print(" ...");
+   while (!client.connected()) {
+      Serial.print('.');
+
+      if (client.connect((WiFi.getHostname()), "diego", "D1993rS*")) {  // Não confundir o id com o server
+         Serial.println(" connected.");
+         String topic = String(WiFi.getHostname()) + "/output";
+         client.subscribe(topic.c_str());
+         client.subscribe("getdevices");
+      } else {
+         Serial.println("Failed, reconnecting ... ");
+         Serial.print("Client State: ");
+         Serial.println(client.state());
+      }
+
+      delay(1000);
+   }
+}
+
+void initPumpConfiguration() {
    for (int indice = 0; indice < ACTIVE_PUMPS; indice++) {
       loadConfigurationCloud(myPumps[indice].pumperCode, myPumps[indice].getJsonDataPointer());
       updateConfiguration(myPumps[indice].getJsonData(), myPumps[indice].getDriveTimesPointer(), myPumps[indice].pulseDurationPointer);
    }
-}
-
-void initNTP() {
-   ntp.begin();
-   ntp.forceUpdate();
 }
 
 void initRtos() {
@@ -375,32 +414,14 @@ void initRtos() {
       xTaskCreatePinnedToCore(vTaskTurnOnPump, "taskTurnOnPump", configMINIMAL_STACK_SIZE + 1024, &myPumps[indice], 3, &TurnOnPumpTaskHandle, APP_CPU_NUM);
    }
 
-   xTaskCreatePinnedToCore(vTaskTdsSensorReadTask, "TDS Sensor Read Task", 4096, NULL, 1, &TdsSensorReadTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskTdsDataProcessTask, "TDS Data Process Task", 4096, NULL, 2, &TdsDataProcessTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskPhSensorReadTask, "pH Meter Task", 4096, NULL, 1, &PhSensorReadTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskPhDataProcessTask, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskThermistorSensorReadTask, "Thermistor Sensor Read Task", 4096, NULL, 1, &ThermistorSensorReadTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskThermistorDataProcessTask, "Thermistor Data Process Task", 4096, NULL, 2, &ThermistorDataProcessTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskTdsMotorControlTask, "TDS Motor Control", 4096, NULL, 1, &TdsMotorControlTaskHandle, APP_CPU_NUM);
-   xTaskCreatePinnedToCore(vTaskPhMotorControlTask, "PH Motor Control", 4096, NULL, 1, &PhMotorControlTaskHandle, APP_CPU_NUM);
-}
-
-void reconnect() {
-   while (!client.connected()) {
-      Serial.print("Attempting MQTT connection... ");
-
-      if (client.connect(WiFi.getHostname(), "diego", "D1993rS*")) {
-         Serial.println("connected");
-         String topic = String(WiFi.getHostname()) + "/output";
-         client.subscribe(topic.c_str());
-         client.subscribe("getdevices");
-      } else {
-         Serial.println("Failed, reconnecting ... ");
-         Serial.print("Client State: ");
-         Serial.println(client.state());
-         Serial.println("Try again in 5 seconds");
-      }
-   }
+   // xTaskCreatePinnedToCore(vTaskTdsSensorReadTask, "TDS Sensor Read Task", 4096, NULL, 1, &TdsSensorReadTaskHandle, APP_CPU_NUM);
+   // xTaskCreatePinnedToCore(vTaskTdsDataProcessTask, "TDS Data Process Task", 4096, NULL, 2, &TdsDataProcessTaskHandle, APP_CPU_NUM);
+   // xTaskCreatePinnedToCore(vTaskPhSensorReadTask, "pH Meter Task", 4096, NULL, 1, &PhSensorReadTaskHandle, APP_CPU_NUM);
+   // xTaskCreatePinnedToCore(vTaskPhDataProcessTask, "pH Data Process Task", 4096, NULL, 2, &PhDataProcessTaskHandle, APP_CPU_NUM);
+   // xTaskCreatePinnedToCore(vTaskThermistorSensorReadTask, "Thermistor Sensor Read Task", 4096, NULL, 1, &ThermistorSensorReadTaskHandle, APP_CPU_NUM);
+   // xTaskCreatePinnedToCore(vTaskThermistorDataProcessTask, "Thermistor Data Process Task", 4096, NULL, 2, &ThermistorDataProcessTaskHandle, APP_CPU_NUM);
+   // xTaskCreatePinnedToCore(vTaskTdsMotorControlTask, "TDS Motor Control", 4096, NULL, 1, &TdsMotorControlTaskHandle, APP_CPU_NUM);
+   // xTaskCreatePinnedToCore(vTaskPhMotorControlTask, "PH Motor Control", 4096, NULL, 1, &PhMotorControlTaskHandle, APP_CPU_NUM);
 }
 
 void initServer() {
@@ -411,58 +432,73 @@ void initServer() {
    server.begin();
 }
 
-void setup() {
-   Serial.begin(115200);
-
-   initSPIFFS();
-   initWiFi();
-   initNTP();
-   initConfiguration();
-   initRtos();
-   initServer();
-
-   // Obter o gateway padrão da rede
-   IPAddress gateway = WiFi.gatewayIP();
-   mqtt_server = gateway.toString();
-
-   client.setServer(mqtt_server.c_str(), mqtt_port);
-   client.setCallback(callback);
-
-   // Configuração dos pinos do motor A
+void initTDSPIDController() {
+   // Configuração dos pinos do motor
    pinMode(motorAPin1, OUTPUT);
    pinMode(motorAPin2, OUTPUT);
    pinMode(enableAPin, OUTPUT);
 
-   // Configuração dos pinos do motor B
+   // Configuração do PWM do motor
+   ledcSetup(pwmChannelA, freq, resolution);
+   ledcAttachPin(enableAPin, pwmChannelA);
+
+   pidTDS.setControllerDirection("direct");
+
+   pidTDS.setKp(0.1);
+   pidTDS.setKi(0.2);
+   pidTDS.setKd(0.01);
+}
+
+void initPHPIDController() {
+   // Configuração dos pinos do motor
    pinMode(motorBPin1, OUTPUT);
    pinMode(motorBPin2, OUTPUT);
    pinMode(enableBPin, OUTPUT);
 
-   // Configuração do PWM para ambos os motores
-   ledcSetup(pwmChannelA, freq, resolution);
+   // Configuração do PWM do motor
    ledcSetup(pwmChannelB, freq, resolution);
-
-   // Associação do canal PWM aos pinos
-   ledcAttachPin(enableAPin, pwmChannelA);
    ledcAttachPin(enableBPin, pwmChannelB);
 
-   // Inicialização dos parâmetros do PID (ajuste conforme necessário)
-   pidTDS.setKp(0.1);
-   pidTDS.setKi(0.2);
-   pidTDS.setKd(0.01);
+   pidPH.setControllerDirection("reverse");
 
    pidPH.setKp(0.1);
-   pidPH.setKi(0.1);
+   pidPH.setKi(0.2);
    pidPH.setKd(0.01);
+}
 
+void setup() {
+   // Inicializa a comunicação serial
+   Serial.begin(115200);
+
+   // Configura o pino do LED interno como saída
    pinMode(LED_BUILTIN, OUTPUT);
+
+   initSPIFFS();
+   initWiFi();
+   initNTP();
+   initPumpConfiguration();
+
+   // initTDSPIDController();
+   // initPHPIDController();
+
+   // Obter o gateway padrão da rede
+   // IPAddress gateway = WiFi.gatewayIP();
+   // mqtt_server = gateway.toString();
+
+   client.setServer(mqtt_server.c_str(), mqtt_port);
+   client.setCallback(callback);
+
+   initMqtt();
 
    for (int indice = 0; indice < ACTIVE_PUMPS; indice++) {
       pinMode(outputGPIOs[indice], OUTPUT);
    }
 
+   initRtos();
+   initServer();
+
    // Allow the hardware to sort itself out
-   delay(1500);
+   delay(1000);
 }
 
 void loop() {
@@ -495,10 +531,22 @@ void vTaskNTP(void* pvParameters) {
 void vTaskMqttReconnect(void* parameter) {
    while (true) {
       if (!client.connected()) {
-         reconnect();
+         Serial.println("Reconnecting to Mqtt...");
+         client.disconnect();
+
+         if (client.connect((WiFi.getHostname()), "diego", "D1993rS*")) {  // Não confundir o id com o server
+            Serial.println(" connected.");
+            String topic = String(WiFi.getHostname()) + "/output";
+            client.subscribe(topic.c_str());
+            client.subscribe("getdevices");
+         } else {
+            Serial.println("Failed, reconnecting ... ");
+            Serial.print("Client State: ");
+            Serial.println(client.state());
+         }
       }
       client.loop();
-      vTaskDelay(1000);
+      vTaskDelay(pdMS_TO_TICKS(CHECK_MQTT_DELAY));
    }
 }
 
@@ -534,41 +582,39 @@ void vTaskTurnOnPump(void* pvParameters) {
 void vTaskTdsSensorReadTask(void* pvParameter) {
    while (true) {
       tdsMeter.update();
-      vTaskDelay(100 / portTICK_PERIOD_MS);
+      vTaskDelay(pdMS_TO_TICKS(TDS_SENSOR_READ_DELAY));
    }
 }
 
 void vTaskTdsDataProcessTask(void* pvParameter) {
    while (true) {
       float tdsValue = tdsMeter.getTDSValue();
-      float controlOutputTDS = pidTDS.pid_control(tdsValue, 350.0);
-
-      printf("Control Output TDS: %.2f\n", controlOutputTDS);
+      float controlOutputTDS = pidTDS.pid_control(tdsValue, 700.0);
 
       xSemaphoreTake(xPIDControllerMutex, portMAX_DELAY);
-      dutyCycleA = convertControlOutputToDutyCycle(controlOutputTDS, 350.0);
+      dutyCycleA = convertControlOutputToDutyCycle(controlOutputTDS, 700.0);
       printf("Duty Cycle TDS: %d\n", dutyCycleA);
       xSemaphoreGive(xPIDControllerMutex);
 
-      Serial.printf("TDS Value: %.2f uS/cm\n", tdsValue);
+      Serial.printf("TDS Value: %.0f uS/cm\n", tdsValue);
 
       if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
          String tdsTopic = String("sensors/") + String(WiFi.getHostname()) + "/tds";
-         String tdsMessage = String(tdsValue, 2);
+         String tdsMessage = String(tdsValue, 0);
          if (client.connected()) {
             client.publish(tdsTopic.c_str(), tdsMessage.c_str());
          }
          xSemaphoreGive(xWifiMutex);
       }
 
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
+      vTaskDelay(pdMS_TO_TICKS(TDS_DATA_PROCESS_DELAY));
    }
 }
 
 void vTaskPhSensorReadTask(void* pvParameter) {
    while (true) {
       phMeter.update();
-      vTaskDelay(100 / portTICK_PERIOD_MS);
+      vTaskDelay(pdMS_TO_TICKS(PH_SENSOR_READ_DELAY));
    }
 }
 
@@ -582,25 +628,25 @@ void vTaskPhDataProcessTask(void* pvParameter) {
       printf("Duty Cycle PH: %d\n", dutyCycleB);
       xSemaphoreGive(xPIDControllerMutex);
 
-      Serial.printf("pH Value: %.2f\n", phValue);
+      Serial.printf("pH Value: %.1f\n", phValue);
 
       if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
          String phTopic = String("sensors/") + String(WiFi.getHostname()) + "/ph";
-         String phMessage = String(phValue, 2);
+         String phMessage = String(phValue, 1);
          if (client.connected()) {
             client.publish(phTopic.c_str(), phMessage.c_str());
          }
          xSemaphoreGive(xWifiMutex);
       }
 
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
+      vTaskDelay(pdMS_TO_TICKS(PH_DATA_PROCESS_DELAY));
    }
 }
 
 void vTaskThermistorSensorReadTask(void* pvParameter) {
    while (true) {
       thermistor.update();
-      vTaskDelay(100 / portTICK_PERIOD_MS);
+      vTaskDelay(pdMS_TO_TICKS(THERMISTOR_SENSOR_READ_DELAY));
    }
 }
 
@@ -608,18 +654,18 @@ void vTaskThermistorDataProcessTask(void* pvParameter) {
    while (true) {
       float temperature = thermistor.getTemperature();
 
-      Serial.printf("Temperature: %.2f °C\n", temperature);
+      Serial.printf("Temperature: %.1f °C\n", temperature);
 
       if (xSemaphoreTake(xWifiMutex, portMAX_DELAY)) {
          String temperatureTopic = String("sensors/") + String(WiFi.getHostname()) + "/temperature";
-         String temperatureMessage = String(temperature, 2);
+         String temperatureMessage = String(temperature, 1);
          if (client.connected()) {
             client.publish(temperatureTopic.c_str(), temperatureMessage.c_str());
          }
          xSemaphoreGive(xWifiMutex);
       }
 
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
+      vTaskDelay(pdMS_TO_TICKS(THERMISTOR_DATA_PROCESS_DELAY));
    }
 }
 
@@ -631,7 +677,7 @@ void vTaskTdsMotorControlTask(void* pvParameter) {
 
       controlMotor(motorAPin1, motorAPin2, pwmChannelA, localDutyCycleA);
 
-      vTaskDelay(100 / portTICK_PERIOD_MS);
+      vTaskDelay(pdMS_TO_TICKS(TDS_MOTOR_CONTROL_DELAY));
    }
 }
 
@@ -643,6 +689,6 @@ void vTaskPhMotorControlTask(void* pvParameter) {
 
       controlMotor(motorBPin1, motorBPin2, pwmChannelB, localDutyCycleB);
 
-      vTaskDelay(100 / portTICK_PERIOD_MS);
+      vTaskDelay(pdMS_TO_TICKS(PH_MOTOR_CONTROL_DELAY));
    }
 }
